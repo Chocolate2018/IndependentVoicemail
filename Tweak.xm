@@ -32,124 +32,113 @@ static void IVLog(NSString *format, ...) {
         [NSFileHandle fileHandleForWritingAtPath:IVLogPath];
     }
 
-    [h seekToEndOfFile];
+    if (h) {
+        [h seekToEndOfFile];
 
-    [h writeData:
-        [line dataUsingEncoding:NSUTF8StringEncoding]];
+        [h writeData:
+            [line dataUsingEncoding:NSUTF8StringEncoding]];
 
-    [h closeFile];
+        [h closeFile];
+    }
 }
 
 
-static void IVInspectAnswerMethod(id call) {
-
-    if (!call) {
-        IVLog(@"Answer method inspection: call=nil");
-        return;
-    }
-
-    Class cls = object_getClass(call);
-
-    IVLog(@"================================");
-    IVLog(@"ANSWER METHOD INSPECTION");
-    IVLog(@"Class: %@", NSStringFromClass(cls));
-
-    SEL sel = @selector(answerWithRequest:);
-
-    if (![call respondsToSelector:sel]) {
-        IVLog(@"ERROR: answerWithRequest: NOT FOUND");
-        return;
-    }
-
-    Method method =
-        class_getInstanceMethod(cls, sel);
-
-    if (!method) {
-        IVLog(@"ERROR: Method object unavailable");
-        return;
-    }
-
-    const char *types =
-        method_getTypeEncoding(method);
-
-    if (types) {
-        IVLog(@"Type encoding: %s", types);
-    }
-
-    unsigned int argCount =
-        method_getNumberOfArguments(method);
-
-    IVLog(@"Argument count: %u", argCount);
-
-    for (unsigned int i = 0; i < argCount; i++) {
-
-        char buffer[256];
-
-        method_getArgumentType(
-            method,
-            i,
-            buffer,
-            sizeof(buffer)
-        );
-
-        IVLog(@"Argument %u type: %s",
-              i,
-              buffer);
-    }
-
-    char returnBuffer[256];
-
-    method_getReturnType(
-        method,
-        returnBuffer,
-        sizeof(returnBuffer)
-    );
-
-    IVLog(@"Return type: %s",
-          returnBuffer);
-
-    IVLog(@"================================");
-}
-
-
-static void IVCallNotification(
-    NSNotification *note
-) {
-
-    id call = note.object;
-
-    if (!call)
-        return;
-
-    Class cls = object_getClass(call);
+static void IVInspectClass(Class cls) {
 
     if (!cls)
         return;
 
-    NSString *className =
-        NSStringFromClass(cls);
+    IVLog(@"================================");
+    IVLog(@"SAFE CLASS INSPECTION");
+    IVLog(@"Class: %@", NSStringFromClass(cls));
 
-    if (![className isEqualToString:@"TUProxyCall"])
-        return;
+    Method answerMethod =
+        class_getInstanceMethod(
+            cls,
+            @selector(answerWithRequest:)
+        );
 
-    NSString *status = nil;
+    if (!answerMethod) {
+        IVLog(@"answerWithRequest: NOT FOUND");
+    }
+    else {
 
-    if ([call respondsToSelector:@selector(callStatus)]) {
-        @try {
-            status =
-            [call performSelector:@selector(callStatus)];
+        const char *types =
+            method_getTypeEncoding(answerMethod);
+
+        if (types)
+            IVLog(@"Type encoding: %s", types);
+
+        unsigned int count =
+            method_getNumberOfArguments(answerMethod);
+
+        IVLog(@"Argument count: %u", count);
+
+        for (unsigned int i = 0;
+             i < count;
+             i++) {
+
+            char buffer[256] = {0};
+
+            method_getArgumentType(
+                answerMethod,
+                i,
+                buffer,
+                sizeof(buffer)
+            );
+
+            IVLog(@"Argument %u type: %s",
+                  i,
+                  buffer);
         }
-        @catch (...) {
-            status = nil;
-        }
+
+        char returnBuffer[256] = {0};
+
+        method_getReturnType(
+            answerMethod,
+            returnBuffer,
+            sizeof(returnBuffer)
+        );
+
+        IVLog(@"Return type: %s",
+              returnBuffer);
     }
 
-    IVLog(@"--------------------------------");
-    IVLog(@"TUProxyCall notification");
-    IVLog(@"Notification: %@", note.name);
-    IVLog(@"Status: %@", status);
+    IVLog(@"================================");
+}
 
-    IVInspectAnswerMethod(call);
+
+static void IVHandleNotification(
+    NSNotification *note
+) {
+
+    id object = note.object;
+
+    if (!object)
+        return;
+
+    Class cls = object_getClass(object);
+
+    if (!cls)
+        return;
+
+    NSString *name =
+        NSStringFromClass(cls);
+
+    if (![name isEqualToString:@"TUProxyCall"])
+        return;
+
+    IVLog(@"--------------------------------");
+    IVLog(@"TUProxyCall detected");
+    IVLog(@"Notification: %@", note.name);
+
+    /*
+     * IMPORTANT:
+     * Do NOT call any TUProxyCall instance method.
+     * Only inspect the class metadata.
+     */
+
+    IVInspectClass(cls);
 
     IVLog(@"--------------------------------");
 }
@@ -160,7 +149,7 @@ static void IVCallNotification(
     @autoreleasepool {
 
         IVLog(@"================================");
-        IVLog(@"IndependentVoicemail v1.6 LOADED");
+        IVLog(@"IndependentVoicemail v1.6.1 LOADED");
         IVLog(@"Process: %s", getprogname());
         IVLog(@"PID: %d", getpid());
 
@@ -173,7 +162,7 @@ static void IVCallNotification(
              queue:[NSOperationQueue mainQueue]
         usingBlock:^(NSNotification *note) {
 
-            IVCallNotification(note);
+            IVHandleNotification(note);
         }];
 
 
@@ -183,11 +172,12 @@ static void IVCallNotification(
              queue:[NSOperationQueue mainQueue]
         usingBlock:^(NSNotification *note) {
 
-            IVCallNotification(note);
+            IVHandleNotification(note);
         }];
 
 
-        IVLog(@"v1.6 answer method inspector installed");
+        IVLog(@"Safe inspector installed");
+        IVLog(@"No TUProxyCall methods will be invoked");
         IVLog(@"================================");
     }
 }
