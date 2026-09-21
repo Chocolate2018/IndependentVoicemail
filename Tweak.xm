@@ -29,149 +29,165 @@ static void IVLog(NSString *format, ...) {
             attributes:nil];
 
         h =
-            [NSFileHandle fileHandleForWritingAtPath:IVLogPath];
+        [NSFileHandle fileHandleForWritingAtPath:IVLogPath];
     }
 
-    if (h) {
-        [h seekToEndOfFile];
+    [h seekToEndOfFile];
 
-        NSData *data =
-            [line dataUsingEncoding:NSUTF8StringEncoding];
+    [h writeData:
+        [line dataUsingEncoding:NSUTF8StringEncoding]];
 
-        [h writeData:data];
-        [h closeFile];
-    }
+    [h closeFile];
 }
 
-static void IVInspectObject(id object) {
 
-    if (!object) {
-        IVLog(@"Notification object = nil");
+static void IVInspectAnswerMethod(id call) {
+
+    if (!call) {
+        IVLog(@"Answer method inspection: call=nil");
         return;
     }
 
-    Class cls = object_getClass(object);
+    Class cls = object_getClass(call);
 
-    IVLog(@"--------------------------------");
-    IVLog(@"CALL OBJECT INSPECTION");
+    IVLog(@"================================");
+    IVLog(@"ANSWER METHOD INSPECTION");
     IVLog(@"Class: %@", NSStringFromClass(cls));
 
-    if ([object respondsToSelector:@selector(description)]) {
-        IVLog(@"Description: %@", [object description]);
+    SEL sel = @selector(answerWithRequest:);
+
+    if (![call respondsToSelector:sel]) {
+        IVLog(@"ERROR: answerWithRequest: NOT FOUND");
+        return;
     }
 
-    unsigned int count = 0;
+    Method method =
+        class_getInstanceMethod(cls, sel);
 
-    Method *methods = class_copyMethodList(cls, &count);
+    if (!method) {
+        IVLog(@"ERROR: Method object unavailable");
+        return;
+    }
 
-    IVLog(@"Instance method count: %u", count);
+    const char *types =
+        method_getTypeEncoding(method);
 
-    for (unsigned int i = 0; i < count; i++) {
+    if (types) {
+        IVLog(@"Type encoding: %s", types);
+    }
 
-        SEL sel = method_getName(methods[i]);
-        const char *name = sel_getName(sel);
+    unsigned int argCount =
+        method_getNumberOfArguments(method);
 
-        NSString *selector =
-            [NSString stringWithUTF8String:name];
+    IVLog(@"Argument count: %u", argCount);
 
-        NSString *lower =
-            [selector lowercaseString];
+    for (unsigned int i = 0; i < argCount; i++) {
 
-        /*
-         * 只记录与电话状态/接听有关的方法。
-         */
-        if ([lower containsString:@"answer"] ||
-            [lower containsString:@"accept"] ||
-            [lower containsString:@"hold"] ||
-            [lower containsString:@"disconnect"] ||
-            [lower containsString:@"end"] ||
-            [lower containsString:@"state"] ||
-            [lower containsString:@"status"] ||
-            [lower containsString:@"call"]) {
+        char buffer[256];
 
-            IVLog(@"Selector: %@", selector);
+        method_getArgumentType(
+            method,
+            i,
+            buffer,
+            sizeof(buffer)
+        );
+
+        IVLog(@"Argument %u type: %s",
+              i,
+              buffer);
+    }
+
+    char returnBuffer[256];
+
+    method_getReturnType(
+        method,
+        returnBuffer,
+        sizeof(returnBuffer)
+    );
+
+    IVLog(@"Return type: %s",
+          returnBuffer);
+
+    IVLog(@"================================");
+}
+
+
+static void IVCallNotification(
+    NSNotification *note
+) {
+
+    id call = note.object;
+
+    if (!call)
+        return;
+
+    Class cls = object_getClass(call);
+
+    if (!cls)
+        return;
+
+    NSString *className =
+        NSStringFromClass(cls);
+
+    if (![className isEqualToString:@"TUProxyCall"])
+        return;
+
+    NSString *status = nil;
+
+    if ([call respondsToSelector:@selector(callStatus)]) {
+        @try {
+            status =
+            [call performSelector:@selector(callStatus)];
+        }
+        @catch (...) {
+            status = nil;
         }
     }
 
-    free(methods);
+    IVLog(@"--------------------------------");
+    IVLog(@"TUProxyCall notification");
+    IVLog(@"Notification: %@", note.name);
+    IVLog(@"Status: %@", status);
+
+    IVInspectAnswerMethod(call);
 
     IVLog(@"--------------------------------");
 }
 
-static void IVHandleNotification(NSNotification *note) {
-
-    if ([note.name
-         isEqualToString:@"SBIncomingCallPendingNotification"]) {
-
-        IVLog(@"INCOMING CALL DETECTED");
-        IVInspectObject(note.object);
-
-        if (note.userInfo) {
-            IVLog(@"UserInfo: %@", note.userInfo);
-        }
-
-        return;
-    }
-
-    if ([note.name
-         isEqualToString:
-         @"TUCallCenterCallStatusChangedNotification"]) {
-
-        IVLog(@"TU CALL STATUS CHANGED");
-        IVInspectObject(note.object);
-
-        if (note.userInfo) {
-            IVLog(@"UserInfo: %@", note.userInfo);
-        }
-
-        return;
-    }
-
-    if ([note.name
-         isEqualToString:
-         @"TUCallCenterCallStatusChangedInternalNotification"]) {
-
-        IVLog(@"TU CALL INTERNAL STATUS CHANGED");
-        IVInspectObject(note.object);
-
-        if (note.userInfo) {
-            IVLog(@"UserInfo: %@", note.userInfo);
-        }
-
-        return;
-    }
-}
 
 %ctor {
+
     @autoreleasepool {
 
         IVLog(@"================================");
-        IVLog(@"IndependentVoicemail v1.5 LOADED");
-        IVLog(@"Process: SpringBoard");
+        IVLog(@"IndependentVoicemail v1.6 LOADED");
+        IVLog(@"Process: %s", getprogname());
         IVLog(@"PID: %d", getpid());
 
-        NSArray *names = @[
-            @"SBIncomingCallPendingNotification",
-            @"TUCallCenterCallStatusChangedNotification",
-            @"TUCallCenterCallStatusChangedInternalNotification"
-        ];
-
-        NSNotificationCenter *center =
+        NSNotificationCenter *nc =
             [NSNotificationCenter defaultCenter];
 
-        for (NSString *name in names) {
+        [nc addObserverForName:
+                @"TUCallCenterCallStatusChangedNotification"
+            object:nil
+             queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
 
-            [center addObserverForName:name
-                                object:nil
-                                 queue:nil
-                            usingBlock:^(NSNotification *note) {
+            IVCallNotification(note);
+        }];
 
-                IVHandleNotification(note);
 
-            }];
-        }
+        [nc addObserverForName:
+                @"TUCallCenterCallStatusChangedInternalNotification"
+            object:nil
+             queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
 
-        IVLog(@"Call object inspector installed");
+            IVCallNotification(note);
+        }];
+
+
+        IVLog(@"v1.6 answer method inspector installed");
         IVLog(@"================================");
     }
 }
