@@ -1,11 +1,12 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
-#import <dlfcn.h>
 #import <unistd.h>
 
 static NSString * const IVLogPath =
     @"/var/mobile/Library/Preferences/IndependentVoicemailV1.log";
+
+
+#pragma mark - Logging
 
 static void IVLog(NSString *format, ...)
 {
@@ -26,6 +27,7 @@ static void IVLog(NSString *format, ...)
         [NSFileHandle fileHandleForWritingAtPath:IVLogPath];
 
     if (!handle) {
+
         [[NSFileManager defaultManager]
             createFileAtPath:IVLogPath
             contents:nil
@@ -36,22 +38,62 @@ static void IVLog(NSString *format, ...)
     }
 
     if (handle) {
+
         [handle seekToEndOfFile];
 
         NSData *data =
             [line dataUsingEncoding:NSUTF8StringEncoding];
 
         [handle writeData:data];
+
         [handle closeFile];
     }
 }
 
 
+#pragma mark - Safe Runtime Helpers
+
 /*
- * ------------------------------------------------------------
- * Safe class hierarchy inspection
- * ------------------------------------------------------------
+ * v2.0 NEVER invokes TUCall/TUProxyCall instance methods.
+ *
+ * The following functions only inspect Objective-C metadata.
  */
+
+
+static NSString *IVClassName(id object)
+{
+    if (!object)
+        return @"(nil)";
+
+    Class cls = object_getClass(object);
+
+    if (!cls)
+        return @"(unknown)";
+
+    return NSStringFromClass(cls);
+}
+
+
+static NSString *IVObjectDescriptionSafe(id object)
+{
+    /*
+     * Do NOT call -description on arbitrary telephony objects.
+     *
+     * v2.0 intentionally avoids it because a private object's
+     * description implementation could itself execute private
+     * code.
+     */
+
+    if (!object)
+        return @"(nil)";
+
+    return [NSString stringWithFormat:@"<%@ %p>",
+            IVClassName(object),
+            object];
+}
+
+
+#pragma mark - Class Hierarchy
 
 static void IVInspectHierarchy(Class cls)
 {
@@ -60,18 +102,21 @@ static void IVInspectHierarchy(Class cls)
 
     IVLog(@"================================");
     IVLog(@"CLASS HIERARCHY");
+    IVLog(@"CLASS: %@", NSStringFromClass(cls));
     IVLog(@"================================");
 
     Class current = cls;
+
     int level = 0;
 
     while (current) {
 
-        IVLog(@"LEVEL %d: %s",
+        IVLog(@"LEVEL %d: %@",
               level,
-              class_getName(current));
+              NSStringFromClass(current));
 
         current = class_getSuperclass(current);
+
         level++;
 
         if (level > 10)
@@ -80,68 +125,10 @@ static void IVInspectHierarchy(Class cls)
 }
 
 
-/*
- * ------------------------------------------------------------
- * Find the class that actually implements a selector.
- *
- * IMPORTANT:
- * This only examines Objective-C metadata.
- * It does NOT invoke the method.
- * ------------------------------------------------------------
- */
+#pragma mark - Instance Method Metadata
 
-static Class IVFindDefiningClass(Class cls, SEL selector)
-{
-    Class current = cls;
-
-    while (current) {
-
-        Method method =
-            class_getInstanceMethod(current, selector);
-
-        if (method) {
-
-            /*
-             * class_getInstanceMethod() may return an inherited
-             * method, therefore check the direct method list.
-             */
-
-            unsigned int count = 0;
-
-            Method *methods =
-                class_copyMethodList(current, &count);
-
-            for (unsigned int i = 0; i < count; i++) {
-
-                SEL currentSEL =
-                    method_getName(methods[i]);
-
-                if (currentSEL == selector) {
-
-                    free(methods);
-                    return current;
-                }
-            }
-
-            free(methods);
-        }
-
-        current = class_getSuperclass(current);
-    }
-
-    return Nil;
-}
-
-
-/*
- * ------------------------------------------------------------
- * Inspect implementation image.
- *
- * Metadata only. No method execution.
- * ------------------------------------------------------------
- */
-
-static void IVInspectImplementation(Class cls, SEL selector)
+static void IVInspectMethodMetadata(Class cls,
+                                    SEL selector)
 {
     if (!cls || !selector)
         return;
@@ -150,86 +137,70 @@ static void IVInspectImplementation(Class cls, SEL selector)
         class_getInstanceMethod(cls, selector);
 
     if (!method) {
-        IVLog(@"METHOD NOT FOUND: %s",
-              sel_getName(selector));
+
+        IVLog(@"METHOD NOT FOUND: %@",
+              NSStringFromSelector(selector));
+
         return;
     }
-
-    IMP imp =
-        method_getImplementation(method);
 
     const char *encoding =
         method_getTypeEncoding(method);
 
-    Class owner =
-        IVFindDefiningClass(cls, selector);
+    unsigned int argumentCount =
+        method_getNumberOfArguments(method);
 
     IVLog(@"--------------------------------");
-    IVLog(@"SELECTOR: %s",
-          sel_getName(selector));
+    IVLog(@"METHOD METADATA");
+    IVLog(@"CLASS: %@", NSStringFromClass(cls));
+    IVLog(@"SELECTOR: %@",
+          NSStringFromSelector(selector));
 
-    IVLog(@"REQUESTED CLASS: %s",
-          class_getName(cls));
-
-    if (owner) {
-        IVLog(@"DEFINING CLASS: %s",
-              class_getName(owner));
-    } else {
-        IVLog(@"DEFINING CLASS: UNKNOWN");
-    }
-
-    IVLog(@"TYPE ENCODING: %s",
+    IVLog(@"ENCODING: %s",
           encoding ? encoding : "(null)");
 
-    IVLog(@"IMP ADDRESS: %p",
-          imp);
+    IVLog(@"ARGUMENT COUNT: %u",
+          argumentCount);
 
-    Dl_info info;
+    for (unsigned int i = 0;
+         i < argumentCount;
+         i++) {
 
-    memset(&info, 0, sizeof(info));
+        char buffer[256];
 
-    if (imp && dladdr((void *)imp, &info)) {
+        memset(buffer, 0, sizeof(buffer));
 
-        if (info.dli_fname) {
-            IVLog(@"IMPLEMENTATION IMAGE: %s",
-                  info.dli_fname);
-        }
+        method_getArgumentType(method,
+                               i,
+                               buffer,
+                               sizeof(buffer));
 
-        if (info.dli_sname) {
-            IVLog(@"IMPLEMENTATION SYMBOL: %s",
-                  info.dli_sname);
-        }
-
-        if (info.dli_saddr) {
-            IVLog(@"IMPLEMENTATION SYMBOL ADDRESS: %p",
-                  info.dli_saddr);
-        }
-
-    } else {
-
-        IVLog(@"IMPLEMENTATION IMAGE: unavailable");
+        IVLog(@"ARG %u: %s",
+              i,
+              buffer);
     }
+
+    char returnBuffer[256];
+
+    memset(returnBuffer, 0, sizeof(returnBuffer));
+
+    method_getReturnType(method,
+                          returnBuffer,
+                          sizeof(returnBuffer));
+
+    IVLog(@"RETURN: %s",
+          returnBuffer);
 
     IVLog(@"--------------------------------");
 }
 
 
-/*
- * ------------------------------------------------------------
- * Safe direct method scanner.
- *
- * Only scans method names.
- * Never invokes anything.
- * ------------------------------------------------------------
- */
+#pragma mark - Direct Instance Method Scan
 
-static BOOL IVIsInterestingSelector(SEL selector)
+static BOOL IVInterestingMethodName(NSString *name)
 {
-    if (!selector)
+    if (!name)
         return NO;
-
-    NSString *name =
-        NSStringFromSelector(selector);
 
     NSString *lower =
         [name lowercaseString];
@@ -239,8 +210,7 @@ static BOOL IVIsInterestingSelector(SEL selector)
         @"answer",
         @"action",
         @"service",
-        @"delegate",
-        @"call"
+        @"delegate"
     ];
 
     for (NSString *keyword in keywords) {
@@ -253,15 +223,15 @@ static BOOL IVIsInterestingSelector(SEL selector)
 }
 
 
-static void IVScanDirectMethods(Class cls)
+static void IVScanInstanceMethods(Class cls)
 {
     if (!cls)
         return;
 
     IVLog(@"================================");
-    IVLog(@"DIRECT METHOD SCAN");
-    IVLog(@"CLASS: %s",
-          class_getName(cls));
+    IVLog(@"INSTANCE METHOD SCAN");
+    IVLog(@"CLASS: %@",
+          NSStringFromClass(cls));
     IVLog(@"================================");
 
     unsigned int count = 0;
@@ -270,7 +240,9 @@ static void IVScanDirectMethods(Class cls)
         class_copyMethodList(cls, &count);
 
     if (!methods) {
+
         IVLog(@"No direct methods");
+
         return;
     }
 
@@ -279,52 +251,171 @@ static void IVScanDirectMethods(Class cls)
 
     unsigned int printed = 0;
 
-    for (unsigned int i = 0; i < count; i++) {
+    for (unsigned int i = 0;
+         i < count;
+         i++) {
 
         SEL selector =
             method_getName(methods[i]);
 
-        if (!IVIsInterestingSelector(selector))
+        NSString *name =
+            NSStringFromSelector(selector);
+
+        if (!IVInterestingMethodName(name))
             continue;
 
         const char *encoding =
             method_getTypeEncoding(methods[i]);
 
-        IVLog(@"METHOD: %s",
-              sel_getName(selector));
+        IVLog(@"METHOD: %@", name);
 
         IVLog(@"ENCODING: %s",
               encoding ? encoding : "(null)");
 
         printed++;
 
-        if (printed >= 80) {
-            IVLog(@"METHOD OUTPUT LIMIT REACHED");
+        if (printed >= 100) {
+
+            IVLog(@"INSTANCE METHOD OUTPUT LIMIT");
+
             break;
         }
     }
 
-    IVLog(@"INTERESTING METHODS PRINTED: %u",
+    IVLog(@"INTERESTING INSTANCE METHODS: %u",
           printed);
 
     free(methods);
 }
 
 
+#pragma mark - Class Method Scan
+
 /*
- * ------------------------------------------------------------
- * Inspect selected selectors.
+ * This is one of the main new parts of v2.0.
  *
- * These are metadata operations only.
- * ------------------------------------------------------------
+ * We inspect +class methods only.
+ *
+ * NOTHING IS INVOKED.
  */
 
-static void IVInspectKnownSelectors(Class cls)
+static BOOL IVInterestingClassMethodName(NSString *name)
+{
+    if (!name)
+        return NO;
+
+    NSString *lower =
+        [name lowercaseString];
+
+    NSArray *keywords = @[
+        @"request",
+        @"answer",
+        @"action",
+        @"call",
+        @"service",
+        @"proxy"
+    ];
+
+    for (NSString *keyword in keywords) {
+
+        if ([lower containsString:keyword])
+            return YES;
+    }
+
+    return NO;
+}
+
+
+static void IVScanClassMethods(Class cls)
 {
     if (!cls)
         return;
 
-    NSArray *selectors = @[
+    IVLog(@"================================");
+    IVLog(@"CLASS METHOD SCAN");
+    IVLog(@"CLASS: %@",
+          NSStringFromClass(cls));
+    IVLog(@"================================");
+
+    Class metaClass =
+        object_getClass(cls);
+
+    if (!metaClass) {
+
+        IVLog(@"METACLASS NOT FOUND");
+
+        return;
+    }
+
+    unsigned int count = 0;
+
+    Method *methods =
+        class_copyMethodList(metaClass, &count);
+
+    if (!methods) {
+
+        IVLog(@"No class methods");
+
+        return;
+    }
+
+    IVLog(@"DIRECT CLASS METHOD COUNT: %u",
+          count);
+
+    unsigned int printed = 0;
+
+    for (unsigned int i = 0;
+         i < count;
+         i++) {
+
+        SEL selector =
+            method_getName(methods[i]);
+
+        NSString *name =
+            NSStringFromSelector(selector);
+
+        if (!IVInterestingClassMethodName(name))
+            continue;
+
+        const char *encoding =
+            method_getTypeEncoding(methods[i]);
+
+        IVLog(@"CLASS METHOD: +%@", name);
+
+        IVLog(@"ENCODING: %s",
+              encoding ? encoding : "(null)");
+
+        unsigned int args =
+            method_getNumberOfArguments(methods[i]);
+
+        IVLog(@"ARGUMENT COUNT: %u",
+              args);
+
+        printed++;
+
+        if (printed >= 100) {
+
+            IVLog(@"CLASS METHOD OUTPUT LIMIT");
+
+            break;
+        }
+    }
+
+    IVLog(@"INTERESTING CLASS METHODS: %u",
+          printed);
+
+    free(methods);
+}
+
+
+#pragma mark - Selected Metadata
+
+static void IVInspectSelectedMethods(Class cls)
+{
+    if (!cls)
+        return;
+
+    NSArray *names = @[
         @"answerWithRequest:",
         @"initWithCall:",
         @"updateWithCall:",
@@ -333,56 +424,159 @@ static void IVInspectKnownSelectors(Class cls)
         @"callCenter",
         @"callStatus",
         @"callUUID",
-        @"shouldSuppressInCallUI"
+        @"shouldSuppressInCallUI",
+        @"dialRequestForRedial",
+        @"proxyCallActionsDelegate"
     ];
 
-    for (NSString *name in selectors) {
+    for (NSString *name in names) {
 
         SEL selector =
             NSSelectorFromString(name);
 
-        IVInspectImplementation(cls, selector);
+        IVInspectMethodMetadata(cls,
+                                selector);
     }
 }
 
 
+#pragma mark - Notification Inspection
+
 /*
- * ------------------------------------------------------------
- * Notification observer
+ * v2.0 notification inspection.
  *
- * We only log notification arrival.
- * We do NOT call methods on the notification object.
- * ------------------------------------------------------------
+ * We inspect:
+ *
+ *   notification name
+ *   object class
+ *   userInfo keys
+ *   userInfo value classes
+ *
+ * We DO NOT call methods on the object.
  */
 
-static void IVNotification(NSNotification *note)
+static void IVInspectUserInfo(NSDictionary *userInfo)
+{
+    if (!userInfo) {
+
+        IVLog(@"USERINFO: (nil)");
+
+        return;
+    }
+
+    IVLog(@"USERINFO CLASS: %@",
+          NSStringFromClass([userInfo class]));
+
+    IVLog(@"USERINFO COUNT: %lu",
+          (unsigned long)[userInfo count]);
+
+    for (id key in userInfo) {
+
+        id value = userInfo[key];
+
+        IVLog(@"USERINFO KEY: %@",
+              [key isKindOfClass:[NSString class]]
+                  ? key
+                  : IVObjectDescriptionSafe(key));
+
+        IVLog(@"USERINFO VALUE CLASS: %@",
+              IVClassName(value));
+
+        /*
+         * Do not call description on arbitrary private
+         * telephony objects.
+         */
+
+        IVLog(@"USERINFO VALUE: %@",
+              IVObjectDescriptionSafe(value));
+    }
+}
+
+
+static void IVHandleCallNotification(NSNotification *note)
 {
     if (!note)
         return;
 
-    NSString *name = note.name;
+    NSString *name =
+        note.name;
+
+    if (!name)
+        return;
+
+    /*
+     * Only TUCallCenter notifications.
+     */
 
     if (![name containsString:@"TUCallCenter"])
         return;
 
-    IVLog(@"================================");
-    IVLog(@"CALL NOTIFICATION");
-    IVLog(@"NAME: %@", name);
-    IVLog(@"OBJECT CLASS: %@",
-          note.object ? NSStringFromClass([note.object class])
-                       : @"(nil)");
-    IVLog(@"USERINFO CLASS: %@",
-          note.userInfo ? NSStringFromClass([note.userInfo class])
-                        : @"(nil)");
-    IVLog(@"================================");
+    IVLog(@"");
+    IVLog(@"========================================");
+    IVLog(@"CALL NOTIFICATION DETECTED");
+    IVLog(@"========================================");
+
+    IVLog(@"NOTIFICATION: %@",
+          name);
+
+    /*
+     * IMPORTANT:
+     * We only inspect the Objective-C class.
+     */
+
+    if (note.object) {
+
+        IVLog(@"OBJECT CLASS: %@",
+              IVClassName(note.object));
+
+        IVLog(@"OBJECT POINTER: %p",
+              note.object);
+
+    } else {
+
+        IVLog(@"OBJECT: (nil)");
+    }
+
+    IVInspectUserInfo(note.userInfo);
+
+    IVLog(@"========================================");
 }
 
 
-/*
- * ------------------------------------------------------------
- * Main
- * ------------------------------------------------------------
- */
+#pragma mark - Notification Installation
+
+static void IVInstallObservers(void)
+{
+    NSNotificationCenter *center =
+        [NSNotificationCenter defaultCenter];
+
+    NSArray *names = @[
+        @"TUCallCenterCallStatusChangedNotification",
+        @"TUCallCenterCallStatusChangedInternalNotification",
+        @"TUCallCenterCallerIDChangedNotification",
+        @"TUCallCenterDisplayContextChangedNotification",
+        @"TUCallCenterModelChangedNotification",
+        @"TUCallCenterModelStateChangedNotification",
+        @"TUCallCenterProviderContextChangedNotification"
+    ];
+
+    for (NSString *name in names) {
+
+        [center addObserverForName:name
+                            object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification *note) {
+
+            IVHandleCallNotification(note);
+        }];
+
+        IVLog(@"OBSERVER INSTALLED: %@",
+              name);
+    }
+}
+
+
+#pragma mark - Main
 
 %ctor
 {
@@ -390,16 +584,20 @@ static void IVNotification(NSNotification *note)
 
         IVLog(@"");
         IVLog(@"========================================");
-        IVLog(@"IndependentVoicemail v1.9 LOADED");
-        IVLog(@"Process: SpringBoard");
-        IVLog(@"PID: %d", getpid());
+        IVLog(@"IndependentVoicemail v2.0 LOADED");
         IVLog(@"========================================");
+
+        IVLog(@"PROCESS: SpringBoard");
+        IVLog(@"PID: %d", getpid());
+
+        /*
+         * ----------------------------------------------------
+         * TUCall
+         * ----------------------------------------------------
+         */
 
         Class tuCall =
             objc_getClass("TUCall");
-
-        Class tuProxyCall =
-            objc_getClass("TUProxyCall");
 
         if (tuCall) {
 
@@ -407,9 +605,11 @@ static void IVNotification(NSNotification *note)
 
             IVInspectHierarchy(tuCall);
 
-            IVInspectKnownSelectors(tuCall);
+            IVInspectSelectedMethods(tuCall);
 
-            IVScanDirectMethods(tuCall);
+            IVScanInstanceMethods(tuCall);
+
+            IVScanClassMethods(tuCall);
 
         } else {
 
@@ -417,15 +617,26 @@ static void IVNotification(NSNotification *note)
         }
 
 
+        /*
+         * ----------------------------------------------------
+         * TUProxyCall
+         * ----------------------------------------------------
+         */
+
+        Class tuProxyCall =
+            objc_getClass("TUProxyCall");
+
         if (tuProxyCall) {
 
             IVLog(@"TUProxyCall FOUND");
 
             IVInspectHierarchy(tuProxyCall);
 
-            IVInspectKnownSelectors(tuProxyCall);
+            IVInspectSelectedMethods(tuProxyCall);
 
-            IVScanDirectMethods(tuProxyCall);
+            IVScanInstanceMethods(tuProxyCall);
+
+            IVScanClassMethods(tuProxyCall);
 
         } else {
 
@@ -434,35 +645,34 @@ static void IVNotification(NSNotification *note)
 
 
         /*
-         * Only observe notifications.
+         * ----------------------------------------------------
+         * Notifications
+         * ----------------------------------------------------
          */
 
-        NSNotificationCenter *center =
-            [NSNotificationCenter defaultCenter];
-
-        [center addObserverForName:
-            @"TUCallCenterCallStatusChangedNotification"
-            object:nil
-            queue:nil
-            usingBlock:^(NSNotification *note) {
-
-                IVNotification(note);
-            }];
+        IVInstallObservers();
 
 
-        [center addObserverForName:
-            @"TUCallCenterCallStatusChangedInternalNotification"
-            object:nil
-            queue:nil
-            usingBlock:^(NSNotification *note) {
+        /*
+         * ----------------------------------------------------
+         * Safety banner
+         * ----------------------------------------------------
+         */
 
-                IVNotification(note);
-            }];
+        IVLog(@"");
+        IVLog(@"========================================");
+        IVLog(@"v2.0 SAFE INSPECTION ACTIVE");
+        IVLog(@"========================================");
 
+        IVLog(@"NO answerWithRequest: INVOCATION");
+        IVLog(@"NO callStatus INVOCATION");
+        IVLog(@"NO callUUID INVOCATION");
+        IVLog(@"NO callServicesInterface INVOCATION");
+        IVLog(@"NO proxyCallActionsDelegate INVOCATION");
+        IVLog(@"NO updateWithCall: INVOCATION");
+        IVLog(@"NO TUCall INSTANCE METHOD INVOCATION");
+        IVLog(@"NO TUProxyCall INSTANCE METHOD INVOCATION");
 
-        IVLog(@"v1.9 SAFE INSPECTION INSTALLED");
-        IVLog(@"NO TUCall INSTANCE METHODS INVOKED");
-        IVLog(@"NO TUProxyCall INSTANCE METHODS INVOKED");
         IVLog(@"========================================");
     }
 }
