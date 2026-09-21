@@ -1,13 +1,10 @@
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 #import <unistd.h>
 #import <stdarg.h>
 
 static NSString * const IVLogPath =
     @"/var/mobile/Library/Preferences/IndependentVoicemailV1.log";
-
-static NSTimer *IVTimer = nil;
-static NSInteger IVRemaining = 20;
-static BOOL IVIncomingCall = NO;
 
 static void IVLog(NSString *format, ...) {
     va_list args;
@@ -46,96 +43,101 @@ static void IVLog(NSString *format, ...) {
     }
 }
 
-static void IVStopTimer(void) {
-    if (IVTimer) {
-        [IVTimer invalidate];
-        IVTimer = nil;
-    }
+static void IVInspectObject(id object) {
 
-    IVIncomingCall = NO;
-    IVRemaining = 20;
-}
-
-static void IVTimerTick(NSTimer *timer) {
-
-    if (!IVIncomingCall) {
-        IVStopTimer();
+    if (!object) {
+        IVLog(@"Notification object = nil");
         return;
     }
 
-    IVRemaining--;
+    Class cls = object_getClass(object);
 
-    IVLog(@"Voicemail countdown: %ld seconds remaining",
-          (long)IVRemaining);
+    IVLog(@"--------------------------------");
+    IVLog(@"CALL OBJECT INSPECTION");
+    IVLog(@"Class: %@", NSStringFromClass(cls));
 
-    if (IVRemaining <= 0) {
-
-        IVLog(@"================================");
-        IVLog(@"VOICEMAIL ANSWER POINT REACHED");
-        IVLog(@"AUTO ANSWER NOT ENABLED YET");
-        IVLog(@"================================");
-
-        IVStopTimer();
-    }
-}
-
-static void IVIncomingCallDetected(void) {
-
-    IVStopTimer();
-
-    IVIncomingCall = YES;
-    IVRemaining = 20;
-
-    IVLog(@"================================");
-    IVLog(@"INCOMING CALL DETECTED");
-    IVLog(@"Starting voicemail countdown");
-    IVLog(@"Delay: %ld seconds", (long)IVRemaining);
-    IVLog(@"================================");
-
-    IVTimer =
-        [NSTimer scheduledTimerWithTimeInterval:1.0
-                                         target:[NSBlockOperation blockOperationWithBlock:^{
-        IVTimerTick(nil);
-    }]
-                                       selector:@selector(main)
-                                       userInfo:nil
-                                        repeats:YES];
-}
-
-static void IVNotification(NSNotification *note) {
-
-    NSString *name = note.name;
-
-    if ([name isEqualToString:@"SBIncomingCallPendingNotification"]) {
-
-        IVIncomingCallDetected();
-        return;
+    if ([object respondsToSelector:@selector(description)]) {
+        IVLog(@"Description: %@", [object description]);
     }
 
-    if ([name isEqualToString:@"SBCallCountChangedNotification"]) {
+    unsigned int count = 0;
 
-        IVLog(@"Call count changed");
+    Method *methods = class_copyMethodList(cls, &count);
+
+    IVLog(@"Instance method count: %u", count);
+
+    for (unsigned int i = 0; i < count; i++) {
+
+        SEL sel = method_getName(methods[i]);
+        const char *name = sel_getName(sel);
+
+        NSString *selector =
+            [NSString stringWithUTF8String:name];
+
+        NSString *lower =
+            [selector lowercaseString];
 
         /*
-         * 当系统报告电话数量发生变化时，
-         * 暂时停止当前留言倒计时。
-         *
-         * 后续版本会改成真正判断 TUCall 状态。
+         * 只记录与电话状态/接听有关的方法。
          */
+        if ([lower containsString:@"answer"] ||
+            [lower containsString:@"accept"] ||
+            [lower containsString:@"hold"] ||
+            [lower containsString:@"disconnect"] ||
+            [lower containsString:@"end"] ||
+            [lower containsString:@"state"] ||
+            [lower containsString:@"status"] ||
+            [lower containsString:@"call"]) {
+
+            IVLog(@"Selector: %@", selector);
+        }
+    }
+
+    free(methods);
+
+    IVLog(@"--------------------------------");
+}
+
+static void IVHandleNotification(NSNotification *note) {
+
+    if ([note.name
+         isEqualToString:@"SBIncomingCallPendingNotification"]) {
+
+        IVLog(@"INCOMING CALL DETECTED");
+        IVInspectObject(note.object);
+
+        if (note.userInfo) {
+            IVLog(@"UserInfo: %@", note.userInfo);
+        }
+
         return;
     }
 
-    if ([name isEqualToString:
+    if ([note.name
+         isEqualToString:
          @"TUCallCenterCallStatusChangedNotification"]) {
 
-        IVLog(@"TUCall status changed");
+        IVLog(@"TU CALL STATUS CHANGED");
+        IVInspectObject(note.object);
+
+        if (note.userInfo) {
+            IVLog(@"UserInfo: %@", note.userInfo);
+        }
+
         return;
     }
 
-    if ([name isEqualToString:
+    if ([note.name
+         isEqualToString:
          @"TUCallCenterCallStatusChangedInternalNotification"]) {
 
-        IVLog(@"TUCall internal status changed");
+        IVLog(@"TU CALL INTERNAL STATUS CHANGED");
+        IVInspectObject(note.object);
+
+        if (note.userInfo) {
+            IVLog(@"UserInfo: %@", note.userInfo);
+        }
+
         return;
     }
 }
@@ -144,19 +146,18 @@ static void IVNotification(NSNotification *note) {
     @autoreleasepool {
 
         IVLog(@"================================");
-        IVLog(@"IndependentVoicemail v1.4 LOADED");
+        IVLog(@"IndependentVoicemail v1.5 LOADED");
         IVLog(@"Process: SpringBoard");
         IVLog(@"PID: %d", getpid());
 
-        NSNotificationCenter *center =
-            [NSNotificationCenter defaultCenter];
-
         NSArray *names = @[
             @"SBIncomingCallPendingNotification",
-            @"SBCallCountChangedNotification",
             @"TUCallCenterCallStatusChangedNotification",
             @"TUCallCenterCallStatusChangedInternalNotification"
         ];
+
+        NSNotificationCenter *center =
+            [NSNotificationCenter defaultCenter];
 
         for (NSString *name in names) {
 
@@ -165,12 +166,12 @@ static void IVNotification(NSNotification *note) {
                                  queue:nil
                             usingBlock:^(NSNotification *note) {
 
-                IVNotification(note);
+                IVHandleNotification(note);
 
             }];
         }
 
-        IVLog(@"Voicemail state machine installed");
+        IVLog(@"Call object inspector installed");
         IVLog(@"================================");
     }
 }
