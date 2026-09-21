@@ -43,43 +43,88 @@ static void IVLog(NSString *format, ...) {
     }
 }
 
-static void IVCallStateChanged(NSNotification *note) {
-    IVLog(@"Notification received: %@",
-          note.name);
+static void IVHandleCallNotification(NSNotification *note) {
+
+    NSString *name = note.name;
+
+    if ([name isEqualToString:@"SBIncomingCallPendingNotification"]) {
+
+        IVLog(@"--------------------------------");
+        IVLog(@"INCOMING CALL EVENT DETECTED");
+        IVLog(@"Notification: %@", name);
+        IVLog(@"Object: %@", note.object);
+        IVLog(@"UserInfo: %@", note.userInfo);
+        IVLog(@"--------------------------------");
+
+        return;
+    }
+
+    if ([name isEqualToString:
+         @"TUCallCenterCallStatusChangedNotification"]) {
+
+        IVLog(@"CALL STATUS CHANGED");
+        IVLog(@"Object: %@", note.object);
+        IVLog(@"UserInfo: %@", note.userInfo);
+
+        return;
+    }
+
+    if ([name isEqualToString:
+         @"TUCallCenterCallStatusChangedInternalNotification"]) {
+
+        IVLog(@"CALL INTERNAL STATUS CHANGED");
+        IVLog(@"Object: %@", note.object);
+        IVLog(@"UserInfo: %@", note.userInfo);
+
+        return;
+    }
+
+    if ([name isEqualToString:
+         @"SBCallCountChangedNotification"]) {
+
+        IVLog(@"CALL COUNT CHANGED");
+        IVLog(@"Object: %@", note.object);
+        IVLog(@"UserInfo: %@", note.userInfo);
+
+        return;
+    }
 }
 
 %ctor {
     @autoreleasepool {
 
         IVLog(@"================================");
-        IVLog(@"IndependentVoicemail v1.2 LOADED");
+        IVLog(@"IndependentVoicemail v1.3 LOADED");
         IVLog(@"Process: SpringBoard");
         IVLog(@"PID: %d", getpid());
 
-        /*
-         * Diagnostic only.
-         * No automatic answering.
-         * No recording.
-         * No MobileSMS injection.
-         */
+        NSArray *names = @[
+            @"SBIncomingCallPendingNotification",
+            @"SBCallCountChangedNotification",
+            @"TUCallCenterCallStatusChangedNotification",
+            @"TUCallCenterCallStatusChangedInternalNotification",
+            @"TUCallTransmissionStateChangedNotification",
+            @"TUCallCenterCallerIDChangedNotification",
+            @"TUCallCenterModelStateChangedNotification",
+            @"TUCallCenterProviderContextChangedNotification"
+        ];
 
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:nil
-            object:nil
-            queue:nil
-            usingBlock:^(NSNotification *note) {
+        NSNotificationCenter *center =
+            [NSNotificationCenter defaultCenter];
 
-                NSString *name = note.name;
+        for (NSString *name in names) {
 
-                if ([name rangeOfString:@"Call"
-                                options:NSCaseInsensitiveSearch].location
-                    != NSNotFound) {
+            [center addObserverForName:name
+                                object:nil
+                                 queue:nil
+                            usingBlock:^(NSNotification *note) {
 
-                    IVCallStateChanged(note);
-                }
+                IVHandleCallNotification(note);
+
             }];
+        }
 
-        IVLog(@"Call notification monitor installed");
+        IVLog(@"Call state observers installed");
         IVLog(@"================================");
     }
 }
