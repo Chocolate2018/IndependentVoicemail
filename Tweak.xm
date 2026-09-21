@@ -539,30 +539,6 @@ static void IVClearAnswerTimer(void)
 }
 
 
-static void IVResetCallState(void)
-{
-    IVLog(@"Reset call state");
-
-    IVClearAnswerTimer();
-
-    IVStopGreeting();
-
-    IVStopRecording();
-
-    IVDeactivateAudio();
-
-    IVCurrentCall = nil;
-
-    IVCallActive = NO;
-
-    IVAnswerInProgress = NO;
-
-    IVGreetingFinished = NO;
-
-    IVRecordingStarted = NO;
-}
-
-
 #pragma mark ==================================================
 #pragma mark Runtime
 #pragma mark ==================================================
