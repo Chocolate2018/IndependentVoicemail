@@ -1,0 +1,39 @@
+name: Build IndependentVoicemail
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install ldid xz
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+
+      - name: Build rootless package
+        run: |
+          export THEOS="$HOME/theos"
+          make package FINALPACKAGE=1
+
+      - name: Show package
+        run: |
+          ls -lh packages/
+          dpkg-deb -I packages/*.deb || true
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: IndependentVoicemail-v0.1-deb
+          path: packages/*.deb
