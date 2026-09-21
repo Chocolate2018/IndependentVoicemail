@@ -1,10 +1,13 @@
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 #import <unistd.h>
 #import <stdarg.h>
 
 static NSString * const IVLogPath =
     @"/var/mobile/Library/Preferences/IndependentVoicemailV1.log";
+
+static NSTimer *IVTimer = nil;
+static NSInteger IVRemaining = 20;
+static BOOL IVIncomingCall = NO;
 
 static void IVLog(NSString *format, ...) {
     va_list args;
@@ -43,49 +46,96 @@ static void IVLog(NSString *format, ...) {
     }
 }
 
-static void IVHandleCallNotification(NSNotification *note) {
+static void IVStopTimer(void) {
+    if (IVTimer) {
+        [IVTimer invalidate];
+        IVTimer = nil;
+    }
+
+    IVIncomingCall = NO;
+    IVRemaining = 20;
+}
+
+static void IVTimerTick(NSTimer *timer) {
+
+    if (!IVIncomingCall) {
+        IVStopTimer();
+        return;
+    }
+
+    IVRemaining--;
+
+    IVLog(@"Voicemail countdown: %ld seconds remaining",
+          (long)IVRemaining);
+
+    if (IVRemaining <= 0) {
+
+        IVLog(@"================================");
+        IVLog(@"VOICEMAIL ANSWER POINT REACHED");
+        IVLog(@"AUTO ANSWER NOT ENABLED YET");
+        IVLog(@"================================");
+
+        IVStopTimer();
+    }
+}
+
+static void IVIncomingCallDetected(void) {
+
+    IVStopTimer();
+
+    IVIncomingCall = YES;
+    IVRemaining = 20;
+
+    IVLog(@"================================");
+    IVLog(@"INCOMING CALL DETECTED");
+    IVLog(@"Starting voicemail countdown");
+    IVLog(@"Delay: %ld seconds", (long)IVRemaining);
+    IVLog(@"================================");
+
+    IVTimer =
+        [NSTimer scheduledTimerWithTimeInterval:1.0
+                                         target:[NSBlockOperation blockOperationWithBlock:^{
+        IVTimerTick(nil);
+    }]
+                                       selector:@selector(main)
+                                       userInfo:nil
+                                        repeats:YES];
+}
+
+static void IVNotification(NSNotification *note) {
 
     NSString *name = note.name;
 
     if ([name isEqualToString:@"SBIncomingCallPendingNotification"]) {
 
-        IVLog(@"--------------------------------");
-        IVLog(@"INCOMING CALL EVENT DETECTED");
-        IVLog(@"Notification: %@", name);
-        IVLog(@"Object: %@", note.object);
-        IVLog(@"UserInfo: %@", note.userInfo);
-        IVLog(@"--------------------------------");
+        IVIncomingCallDetected();
+        return;
+    }
 
+    if ([name isEqualToString:@"SBCallCountChangedNotification"]) {
+
+        IVLog(@"Call count changed");
+
+        /*
+         * 当系统报告电话数量发生变化时，
+         * 暂时停止当前留言倒计时。
+         *
+         * 后续版本会改成真正判断 TUCall 状态。
+         */
         return;
     }
 
     if ([name isEqualToString:
          @"TUCallCenterCallStatusChangedNotification"]) {
 
-        IVLog(@"CALL STATUS CHANGED");
-        IVLog(@"Object: %@", note.object);
-        IVLog(@"UserInfo: %@", note.userInfo);
-
+        IVLog(@"TUCall status changed");
         return;
     }
 
     if ([name isEqualToString:
          @"TUCallCenterCallStatusChangedInternalNotification"]) {
 
-        IVLog(@"CALL INTERNAL STATUS CHANGED");
-        IVLog(@"Object: %@", note.object);
-        IVLog(@"UserInfo: %@", note.userInfo);
-
-        return;
-    }
-
-    if ([name isEqualToString:
-         @"SBCallCountChangedNotification"]) {
-
-        IVLog(@"CALL COUNT CHANGED");
-        IVLog(@"Object: %@", note.object);
-        IVLog(@"UserInfo: %@", note.userInfo);
-
+        IVLog(@"TUCall internal status changed");
         return;
     }
 }
@@ -94,23 +144,19 @@ static void IVHandleCallNotification(NSNotification *note) {
     @autoreleasepool {
 
         IVLog(@"================================");
-        IVLog(@"IndependentVoicemail v1.3 LOADED");
+        IVLog(@"IndependentVoicemail v1.4 LOADED");
         IVLog(@"Process: SpringBoard");
         IVLog(@"PID: %d", getpid());
+
+        NSNotificationCenter *center =
+            [NSNotificationCenter defaultCenter];
 
         NSArray *names = @[
             @"SBIncomingCallPendingNotification",
             @"SBCallCountChangedNotification",
             @"TUCallCenterCallStatusChangedNotification",
-            @"TUCallCenterCallStatusChangedInternalNotification",
-            @"TUCallTransmissionStateChangedNotification",
-            @"TUCallCenterCallerIDChangedNotification",
-            @"TUCallCenterModelStateChangedNotification",
-            @"TUCallCenterProviderContextChangedNotification"
+            @"TUCallCenterCallStatusChangedInternalNotification"
         ];
-
-        NSNotificationCenter *center =
-            [NSNotificationCenter defaultCenter];
 
         for (NSString *name in names) {
 
@@ -119,12 +165,12 @@ static void IVHandleCallNotification(NSNotification *note) {
                                  queue:nil
                             usingBlock:^(NSNotification *note) {
 
-                IVHandleCallNotification(note);
+                IVNotification(note);
 
             }];
         }
 
-        IVLog(@"Call state observers installed");
+        IVLog(@"Voicemail state machine installed");
         IVLog(@"================================");
     }
 }
