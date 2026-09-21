@@ -211,47 +211,6 @@ static BOOL IVPrepareAudioSession(void)
 #pragma mark Stop Audio
 #pragma mark ==================================================
 
-static void IVStopRecording(void);
-
-static void IVStopGreeting(void)
-{
-    if (IVGreetingPlayer) {
-
-        @try {
-
-            [IVGreetingPlayer stop];
-
-        } @catch (__unused NSException *exception) {
-
-        }
-
-        IVGreetingPlayer = nil;
-    }
-}
-
-
-static void IVDeactivateAudio(void)
-{
-    if (!IVAudioPrepared)
-        return;
-
-    AVAudioSession *session =
-        [AVAudioSession sharedInstance];
-
-    NSError *error = nil;
-
-    [session setActive:NO
-                  error:&error];
-
-    if (error) {
-
-        IVLog(@"Audio deactivation: %@",
-              error);
-    }
-
-    IVAudioPrepared = NO;
-}
-
 
 #pragma mark ==================================================
 #pragma mark Greeting
@@ -496,47 +455,9 @@ static void IVStartRecording(void)
 }
 
 
-static void IVStopRecording(void)
-{
-    if (!IVRecorder)
-        return;
-
-    @try {
-
-        [IVRecorder stop];
-
-    } @catch (__unused NSException *exception) {
-
-    }
-
-    NSString *path =
-        IVRecorder.url.path;
-
-    IVRecorder = nil;
-
-    IVRecordingStarted = NO;
-
-    if (path) {
-
-        IVLog(@"Recording stopped: %@",
-              path);
-    }
-}
-
-
 #pragma mark ==================================================
 #pragma mark Call Cleanup
 #pragma mark ==================================================
-
-static void IVClearAnswerTimer(void)
-{
-    if (IVAnswerTimer) {
-
-        [IVAnswerTimer invalidate];
-
-        IVAnswerTimer = nil;
-    }
-}
 
 
 #pragma mark ==================================================
