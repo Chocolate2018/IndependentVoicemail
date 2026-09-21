@@ -1,0 +1,8 @@
+include $(THEOS)/makefiles/common.mk
+
+BUNDLE_NAME = IndependentVoicemailPrefs
+IndependentVoicemailPrefs_FILES = IndependentVoicemailPrefs.m
+IndependentVoicemailPrefs_FRAMEWORKS = UIKit
+IndependentVoicemailPrefs_INSTALL_PATH = /Library/PreferenceBundles
+
+include $(THEOS_MAKE_PATH)/bundle.mk

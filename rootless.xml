@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>Package</key>
+<dict>
+<key>Name</key><string>com.chocolate2018.independentvoicemail</string>
+<key>Version</key><string>0.1.0</string>
+<key>Architecture</key><string>iphoneos-arm64</string>
+<key>Description</key><string>Independent voicemail foundation for iOS 16 rootless</string>
+<key>Maintainer</key><string>Chocolate2018</string>
+<key>Section</key><string>Tweaks</string>
+</dict>
+</dict></plist>
