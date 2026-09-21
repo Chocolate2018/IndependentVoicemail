@@ -1,12 +1,64 @@
 #import <Foundation/Foundation.h>
+#import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <unistd.h>
+#import <dlfcn.h>
+
+#pragma mark ==================================================
+#pragma mark Configuration
+#pragma mark ==================================================
+
+static NSTimeInterval const IVAnswerDelay = 20.0;
+
+/*
+ * 自定义问候语：
+ *
+ * /var/mobile/Library/Preferences/IndependentVoicemail/
+ * Greeting.caf
+ *
+ * 如果文件不存在，则跳过问候语播放。
+ */
+
+static NSString * const IVRootDirectory =
+    @"/var/mobile/Library/Preferences/IndependentVoicemail";
+
+static NSString * const IVGreetingPath =
+    @"/var/mobile/Library/Preferences/IndependentVoicemail/Greeting.caf";
+
+static NSString * const IVRecordingDirectory =
+    @"/var/mobile/Library/Preferences/IndependentVoicemail/Recordings";
 
 static NSString * const IVLogPath =
-    @"/var/mobile/Library/Preferences/IndependentVoicemailV1.log";
+    @"/var/mobile/Library/Preferences/IndependentVoicemail/IndependentVoicemail.log";
 
 
-#pragma mark - Logging
+#pragma mark ==================================================
+#pragma mark Global State
+#pragma mark ==================================================
+
+static id IVCurrentCall = nil;
+
+static NSTimer *IVAnswerTimer = nil;
+
+static AVAudioPlayer *IVGreetingPlayer = nil;
+
+static AVAudioRecorder *IVRecorder = nil;
+
+static BOOL IVAnswerInProgress = NO;
+
+static BOOL IVCallActive = NO;
+
+static BOOL IVGreetingFinished = NO;
+
+static BOOL IVRecordingStarted = NO;
+
+static BOOL IVAudioPrepared = NO;
+
+
+#pragma mark ==================================================
+#pragma mark Logging
+#pragma mark ==================================================
 
 static void IVLog(NSString *format, ...)
 {
@@ -14,14 +66,16 @@ static void IVLog(NSString *format, ...)
     va_start(args, format);
 
     NSString *message =
-        [[NSString alloc] initWithFormat:format arguments:args];
+        [[NSString alloc] initWithFormat:format
+                               arguments:args];
 
     va_end(args);
 
     NSString *line =
-        [NSString stringWithFormat:@"%@ %@\n",
-         [NSDate date],
-         message];
+        [NSString stringWithFormat:
+            @"[%@] %@\n",
+            [NSDate date],
+            message];
 
     NSFileHandle *handle =
         [NSFileHandle fileHandleForWritingAtPath:IVLogPath];
@@ -39,330 +93,522 @@ static void IVLog(NSString *format, ...)
 
     if (handle) {
 
-        [handle seekToEndOfFile];
+        @try {
 
-        NSData *data =
-            [line dataUsingEncoding:NSUTF8StringEncoding];
+            [handle seekToEndOfFile];
 
-        [handle writeData:data];
+            NSData *data =
+                [line dataUsingEncoding:
+                    NSUTF8StringEncoding];
 
-        [handle closeFile];
-    }
-}
+            [handle writeData:data];
 
+            [handle closeFile];
 
-#pragma mark - Safe Runtime Helpers
+        } @catch (__unused NSException *exception) {
 
-/*
- * v2.0 NEVER invokes TUCall/TUProxyCall instance methods.
- *
- * The following functions only inspect Objective-C metadata.
- */
-
-
-static NSString *IVClassName(id object)
-{
-    if (!object)
-        return @"(nil)";
-
-    Class cls = object_getClass(object);
-
-    if (!cls)
-        return @"(unknown)";
-
-    return NSStringFromClass(cls);
-}
-
-
-static NSString *IVObjectDescriptionSafe(id object)
-{
-    /*
-     * Do NOT call -description on arbitrary telephony objects.
-     *
-     * v2.0 intentionally avoids it because a private object's
-     * description implementation could itself execute private
-     * code.
-     */
-
-    if (!object)
-        return @"(nil)";
-
-    return [NSString stringWithFormat:@"<%@ %p>",
-            IVClassName(object),
-            object];
-}
-
-
-#pragma mark - Class Hierarchy
-
-static void IVInspectHierarchy(Class cls)
-{
-    if (!cls)
-        return;
-
-    IVLog(@"================================");
-    IVLog(@"CLASS HIERARCHY");
-    IVLog(@"CLASS: %@", NSStringFromClass(cls));
-    IVLog(@"================================");
-
-    Class current = cls;
-
-    int level = 0;
-
-    while (current) {
-
-        IVLog(@"LEVEL %d: %@",
-              level,
-              NSStringFromClass(current));
-
-        current = class_getSuperclass(current);
-
-        level++;
-
-        if (level > 10)
-            break;
-    }
-}
-
-
-#pragma mark - Instance Method Metadata
-
-static void IVInspectMethodMetadata(Class cls,
-                                    SEL selector)
-{
-    if (!cls || !selector)
-        return;
-
-    Method method =
-        class_getInstanceMethod(cls, selector);
-
-    if (!method) {
-
-        IVLog(@"METHOD NOT FOUND: %@",
-              NSStringFromSelector(selector));
-
-        return;
-    }
-
-    const char *encoding =
-        method_getTypeEncoding(method);
-
-    unsigned int argumentCount =
-        method_getNumberOfArguments(method);
-
-    IVLog(@"--------------------------------");
-    IVLog(@"METHOD METADATA");
-    IVLog(@"CLASS: %@", NSStringFromClass(cls));
-    IVLog(@"SELECTOR: %@",
-          NSStringFromSelector(selector));
-
-    IVLog(@"ENCODING: %s",
-          encoding ? encoding : "(null)");
-
-    IVLog(@"ARGUMENT COUNT: %u",
-          argumentCount);
-
-    for (unsigned int i = 0;
-         i < argumentCount;
-         i++) {
-
-        char buffer[256];
-
-        memset(buffer, 0, sizeof(buffer));
-
-        method_getArgumentType(method,
-                               i,
-                               buffer,
-                               sizeof(buffer));
-
-        IVLog(@"ARG %u: %s",
-              i,
-              buffer);
-    }
-
-    char returnBuffer[256];
-
-    memset(returnBuffer, 0, sizeof(returnBuffer));
-
-    method_getReturnType(method,
-                          returnBuffer,
-                          sizeof(returnBuffer));
-
-    IVLog(@"RETURN: %s",
-          returnBuffer);
-
-    IVLog(@"--------------------------------");
-}
-
-
-#pragma mark - Direct Instance Method Scan
-
-static BOOL IVInterestingMethodName(NSString *name)
-{
-    if (!name)
-        return NO;
-
-    NSString *lower =
-        [name lowercaseString];
-
-    NSArray *keywords = @[
-        @"request",
-        @"answer",
-        @"action",
-        @"service",
-        @"delegate"
-    ];
-
-    for (NSString *keyword in keywords) {
-
-        if ([lower containsString:keyword])
-            return YES;
-    }
-
-    return NO;
-}
-
-
-static void IVScanInstanceMethods(Class cls)
-{
-    if (!cls)
-        return;
-
-    IVLog(@"================================");
-    IVLog(@"INSTANCE METHOD SCAN");
-    IVLog(@"CLASS: %@",
-          NSStringFromClass(cls));
-    IVLog(@"================================");
-
-    unsigned int count = 0;
-
-    Method *methods =
-        class_copyMethodList(cls, &count);
-
-    if (!methods) {
-
-        IVLog(@"No direct methods");
-
-        return;
-    }
-
-    IVLog(@"DIRECT METHOD COUNT: %u",
-          count);
-
-    unsigned int printed = 0;
-
-    for (unsigned int i = 0;
-         i < count;
-         i++) {
-
-        SEL selector =
-            method_getName(methods[i]);
-
-        NSString *name =
-            NSStringFromSelector(selector);
-
-        if (!IVInterestingMethodName(name))
-            continue;
-
-        const char *encoding =
-            method_getTypeEncoding(methods[i]);
-
-        IVLog(@"METHOD: %@", name);
-
-        IVLog(@"ENCODING: %s",
-              encoding ? encoding : "(null)");
-
-        printed++;
-
-        if (printed >= 100) {
-
-            IVLog(@"INSTANCE METHOD OUTPUT LIMIT");
-
-            break;
         }
     }
-
-    IVLog(@"INTERESTING INSTANCE METHODS: %u",
-          printed);
-
-    free(methods);
 }
 
 
-#pragma mark - Class Method Scan
+#pragma mark ==================================================
+#pragma mark Directory
+#pragma mark ==================================================
 
-/*
- * This is one of the main new parts of v2.0.
- *
- * We inspect +class methods only.
- *
- * NOTHING IS INVOKED.
- */
+static void IVCreateDirectories(void)
+{
+    NSFileManager *fm =
+        [NSFileManager defaultManager];
 
-static BOOL IVInterestingClassMethodName(NSString *name)
+    NSError *error = nil;
+
+    [fm createDirectoryAtPath:IVRootDirectory
+   withIntermediateDirectories:YES
+                    attributes:nil
+                         error:&error];
+
+    if (error) {
+
+        IVLog(@"Root directory error: %@",
+              error);
+    }
+
+    error = nil;
+
+    [fm createDirectoryAtPath:IVRecordingDirectory
+   withIntermediateDirectories:YES
+                    attributes:nil
+                         error:&error];
+
+    if (error) {
+
+        IVLog(@"Recording directory error: %@",
+              error);
+    }
+}
+
+
+#pragma mark ==================================================
+#pragma mark Audio Session
+#pragma mark ==================================================
+
+static BOOL IVPrepareAudioSession(void)
+{
+    /*
+     * 这一部分只有在接通以后才执行。
+     *
+     * 不在 SpringBoard 启动阶段激活 AudioSession。
+     */
+
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
+    NSError *error = nil;
+
+    BOOL ok =
+        [session setCategory:
+                    AVAudioSessionCategoryPlayAndRecord
+                   mode:
+                    AVAudioSessionModeVoiceChat
+                options:
+                    AVAudioSessionCategoryOptionAllowBluetooth
+                    |
+                    AVAudioSessionCategoryOptionDefaultToSpeaker
+                  error:&error];
+
+    if (!ok || error) {
+
+        IVLog(@"Audio category failed: %@",
+              error);
+
+        return NO;
+    }
+
+    error = nil;
+
+    ok =
+        [session setActive:YES
+                     error:&error];
+
+    if (!ok || error) {
+
+        IVLog(@"Audio session activation failed: %@",
+              error);
+
+        return NO;
+    }
+
+    IVAudioPrepared = YES;
+
+    IVLog(@"Audio session prepared");
+
+    return YES;
+}
+
+
+#pragma mark ==================================================
+#pragma mark Stop Audio
+#pragma mark ==================================================
+
+static void IVStopRecording(void);
+
+static void IVStopGreeting(void)
+{
+    if (IVGreetingPlayer) {
+
+        @try {
+
+            [IVGreetingPlayer stop];
+
+        } @catch (__unused NSException *exception) {
+
+        }
+
+        IVGreetingPlayer = nil;
+    }
+}
+
+
+static void IVDeactivateAudio(void)
+{
+    if (!IVAudioPrepared)
+        return;
+
+    AVAudioSession *session =
+        [AVAudioSession sharedInstance];
+
+    NSError *error = nil;
+
+    [session setActive:NO
+                  error:&error];
+
+    if (error) {
+
+        IVLog(@"Audio deactivation: %@",
+              error);
+    }
+
+    IVAudioPrepared = NO;
+}
+
+
+#pragma mark ==================================================
+#pragma mark Greeting
+#pragma mark ==================================================
+
+static void IVStartRecording(void);
+
+static void IVGreetingDidFinish(void)
+{
+    IVLog(@"Greeting finished");
+
+    IVGreetingFinished = YES;
+
+    IVGreetingPlayer = nil;
+
+    /*
+     * 问候语播放完立即进入录音。
+     */
+
+    IVStartRecording();
+}
+
+
+static void IVPlayGreeting(void)
+{
+    if (!IVCallActive) {
+
+        IVLog(@"Cannot play greeting: call inactive");
+
+        return;
+    }
+
+    NSFileManager *fm =
+        [NSFileManager defaultManager];
+
+    if (![fm fileExistsAtPath:IVGreetingPath]) {
+
+        IVLog(@"Greeting not found");
+
+        /*
+         * 没有自定义问候语时直接录音。
+         */
+
+        IVStartRecording();
+
+        return;
+    }
+
+    NSError *error = nil;
+
+    NSURL *url =
+        [NSURL fileURLWithPath:IVGreetingPath];
+
+    IVGreetingPlayer =
+        [[AVAudioPlayer alloc]
+            initWithContentsOfURL:url
+                            error:&error];
+
+    if (!IVGreetingPlayer || error) {
+
+        IVLog(@"Greeting player failed: %@",
+              error);
+
+        IVGreetingPlayer = nil;
+
+        IVStartRecording();
+
+        return;
+    }
+
+    IVGreetingPlayer.delegate =
+        (id<AVAudioPlayerDelegate>)nil;
+
+    /*
+     * 使用通知观察播放结束。
+     */
+
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:
+            @"IndependentVoicemailGreetingFinished"
+        object:nil
+         queue:nil
+    usingBlock:^(NSNotification *note) {
+
+        IVGreetingDidFinish();
+    }];
+
+    /*
+     * AVAudioPlayer 本身的 delegate 更可靠，
+     * 这里使用内部代理对象困难，因此使用定时器。
+     */
+
+    NSTimeInterval duration =
+        IVGreetingPlayer.duration;
+
+    BOOL started =
+        [IVGreetingPlayer play];
+
+    if (!started) {
+
+        IVLog(@"Greeting playback failed");
+
+        IVGreetingPlayer = nil;
+
+        IVStartRecording();
+
+        return;
+    }
+
+    IVLog(@"Greeting started duration=%.2f",
+          duration);
+
+    /*
+     * 通过 GCD 等待播放结束。
+     */
+
+    dispatch_after(
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            (int64_t)(duration * NSEC_PER_SEC)
+        ),
+        dispatch_get_main_queue(),
+        ^{
+
+        if (!IVCallActive)
+            return;
+
+        if (IVGreetingPlayer) {
+
+            IVGreetingDidFinish();
+        }
+    });
+}
+
+
+#pragma mark ==================================================
+#pragma mark Recording
+#pragma mark ==================================================
+
+static NSString *IVNewRecordingPath(void)
+{
+    NSDateFormatter *formatter =
+        [[NSDateFormatter alloc] init];
+
+    [formatter setDateFormat:
+        @"yyyy-MM-dd-HH-mm-ss"];
+
+    NSString *date =
+        [formatter stringFromDate:[NSDate date]];
+
+    return
+        [IVRecordingDirectory
+            stringByAppendingPathComponent:
+                [NSString stringWithFormat:
+                    @"Voicemail-%@.m4a",
+                    date]];
+}
+
+
+static void IVStartRecording(void)
+{
+    if (!IVCallActive) {
+
+        IVLog(@"Recording refused: call inactive");
+
+        return;
+    }
+
+    if (IVRecordingStarted) {
+
+        IVLog(@"Recording already started");
+
+        return;
+    }
+
+    NSString *path =
+        IVNewRecordingPath();
+
+    NSURL *url =
+        [NSURL fileURLWithPath:path];
+
+    NSDictionary *settings = @{
+        AVFormatIDKey :
+            @(kAudioFormatMPEG4AAC),
+
+        AVSampleRateKey :
+            @44100,
+
+        AVNumberOfChannelsKey :
+            @1,
+
+        AVEncoderAudioQualityKey :
+            @(AVAudioQualityHigh)
+    };
+
+    NSError *error = nil;
+
+    IVRecorder =
+        [[AVAudioRecorder alloc]
+            initWithURL:url
+            settings:settings
+            error:&error];
+
+    if (!IVRecorder || error) {
+
+        IVLog(@"Recorder creation failed: %@",
+              error);
+
+        IVRecorder = nil;
+
+        return;
+    }
+
+    BOOL prepared =
+        [IVRecorder prepareToRecord];
+
+    if (!prepared) {
+
+        IVLog(@"Recorder prepare failed");
+
+        IVRecorder = nil;
+
+        return;
+    }
+
+    BOOL started =
+        [IVRecorder record];
+
+    if (!started) {
+
+        IVLog(@"Recorder start failed");
+
+        IVRecorder = nil;
+
+        return;
+    }
+
+    IVRecordingStarted = YES;
+
+    IVLog(@"Recording started: %@",
+          path);
+}
+
+
+static void IVStopRecording(void)
+{
+    if (!IVRecorder)
+        return;
+
+    @try {
+
+        [IVRecorder stop];
+
+    } @catch (__unused NSException *exception) {
+
+    }
+
+    NSString *path =
+        IVRecorder.url.path;
+
+    IVRecorder = nil;
+
+    IVRecordingStarted = NO;
+
+    if (path) {
+
+        IVLog(@"Recording stopped: %@",
+              path);
+    }
+}
+
+
+#pragma mark ==================================================
+#pragma mark Call Cleanup
+#pragma mark ==================================================
+
+static void IVClearAnswerTimer(void)
+{
+    if (IVAnswerTimer) {
+
+        [IVAnswerTimer invalidate];
+
+        IVAnswerTimer = nil;
+    }
+}
+
+
+static void IVResetCallState(void)
+{
+    IVLog(@"Reset call state");
+
+    IVClearAnswerTimer();
+
+    IVStopGreeting();
+
+    IVStopRecording();
+
+    IVDeactivateAudio();
+
+    IVCurrentCall = nil;
+
+    IVCallActive = NO;
+
+    IVAnswerInProgress = NO;
+
+    IVGreetingFinished = NO;
+
+    IVRecordingStarted = NO;
+}
+
+
+#pragma mark ==================================================
+#pragma mark Runtime
+#pragma mark ==================================================
+
+static Class IVGetClass(NSString *name)
 {
     if (!name)
-        return NO;
+        return Nil;
 
-    NSString *lower =
-        [name lowercaseString];
-
-    NSArray *keywords = @[
-        @"request",
-        @"answer",
-        @"action",
-        @"call",
-        @"service",
-        @"proxy"
-    ];
-
-    for (NSString *keyword in keywords) {
-
-        if ([lower containsString:keyword])
-            return YES;
-    }
-
-    return NO;
+    return objc_getClass(
+        [name UTF8String]
+    );
 }
 
 
-static void IVScanClassMethods(Class cls)
+#pragma mark ==================================================
+#pragma mark TUAnswerRequest
+#pragma mark ==================================================
+
+static id IVCreateAnswerRequest(void)
 {
-    if (!cls)
-        return;
+    Class requestClass =
+        IVGetClass(@"TUAnswerRequest");
 
-    IVLog(@"================================");
-    IVLog(@"CLASS METHOD SCAN");
-    IVLog(@"CLASS: %@",
-          NSStringFromClass(cls));
-    IVLog(@"================================");
+    if (!requestClass) {
 
-    Class metaClass =
-        object_getClass(cls);
+        IVLog(@"TUAnswerRequest unavailable");
 
-    if (!metaClass) {
-
-        IVLog(@"METACLASS NOT FOUND");
-
-        return;
+        return nil;
     }
+
+    IVLog(@"TUAnswerRequest found");
+
+    /*
+     * 优先寻找 +request...
+     */
+
+    Class meta =
+        object_getClass(requestClass);
 
     unsigned int count = 0;
 
     Method *methods =
-        class_copyMethodList(metaClass, &count);
+        class_copyMethodList(meta, &count);
 
-    if (!methods) {
-
-        IVLog(@"No class methods");
-
-        return;
-    }
-
-    IVLog(@"DIRECT CLASS METHOD COUNT: %u",
-          count);
-
-    unsigned int printed = 0;
+    SEL factory = NULL;
 
     for (unsigned int i = 0;
          i < count;
@@ -371,129 +617,316 @@ static void IVScanClassMethods(Class cls)
         SEL selector =
             method_getName(methods[i]);
 
-        NSString *name =
-            NSStringFromSelector(selector);
+        const char *name =
+            sel_getName(selector);
 
-        if (!IVInterestingClassMethodName(name))
+        if (!name)
             continue;
-
-        const char *encoding =
-            method_getTypeEncoding(methods[i]);
-
-        IVLog(@"CLASS METHOD: +%@", name);
-
-        IVLog(@"ENCODING: %s",
-              encoding ? encoding : "(null)");
 
         unsigned int args =
             method_getNumberOfArguments(methods[i]);
 
-        IVLog(@"ARGUMENT COUNT: %u",
-              args);
+        /*
+         * self + _cmd
+         */
 
-        printed++;
+        if (args != 2)
+            continue;
 
-        if (printed >= 100) {
+        if (strstr(name, "request") ||
+            strstr(name, "Request")) {
 
-            IVLog(@"CLASS METHOD OUTPUT LIMIT");
+            factory = selector;
 
             break;
         }
     }
 
-    IVLog(@"INTERESTING CLASS METHODS: %u",
-          printed);
-
     free(methods);
+
+    if (factory) {
+
+        IVLog(@"Using TUAnswerRequest factory: %s",
+              sel_getName(factory));
+
+        id (*msg)(id, SEL) =
+            (id (*)(id, SEL))objc_msgSend;
+
+        id request =
+            msg(requestClass, factory);
+
+        if (request) {
+
+            IVLog(@"TUAnswerRequest created");
+
+            return request;
+        }
+    }
+
+    /*
+     * 最后尝试普通 init。
+     *
+     * 只有零参数 init。
+     */
+
+    SEL initSelector =
+        @selector(init);
+
+    if ([requestClass instancesRespondToSelector:initSelector]) {
+
+        id (*allocMsg)(id, SEL) =
+            (id (*)(id, SEL))objc_msgSend;
+
+        id object =
+            allocMsg(requestClass,
+                     @selector(alloc));
+
+        if (object) {
+
+            id (*initMsg)(id, SEL) =
+                (id (*)(id, SEL))objc_msgSend;
+
+            id request =
+                initMsg(object,
+                        initSelector);
+
+            if (request) {
+
+                IVLog(@"TUAnswerRequest created using init");
+
+                return request;
+            }
+        }
+    }
+
+    IVLog(@"Unable to create TUAnswerRequest");
+
+    return nil;
 }
 
 
-#pragma mark - Selected Metadata
+#pragma mark ==================================================
+#pragma mark Answer Call
+#pragma mark ==================================================
 
-static void IVInspectSelectedMethods(Class cls)
+static BOOL IVAnswerCall(void)
 {
-    if (!cls)
+    if (IVAnswerInProgress)
+        return NO;
+
+    id call =
+        IVCurrentCall;
+
+    if (!call) {
+
+        IVLog(@"Answer failed: no call");
+
+        return NO;
+    }
+
+    IVAnswerInProgress = YES;
+
+    IVLog(@"================================");
+    IVLog(@"AUTO ANSWER");
+    IVLog(@"================================");
+
+    SEL selector =
+        NSSelectorFromString(@"answerWithRequest:");
+
+    if (![call respondsToSelector:selector]) {
+
+        IVLog(@"answerWithRequest: unavailable");
+
+        IVAnswerInProgress = NO;
+
+        return NO;
+    }
+
+    id request =
+        IVCreateAnswerRequest();
+
+    if (!request) {
+
+        IVLog(@"No answer request");
+
+        IVAnswerInProgress = NO;
+
+        return NO;
+    }
+
+    void (*answerMsg)(id, SEL, id) =
+        (void (*)(id, SEL, id))objc_msgSend;
+
+    @try {
+
+        answerMsg(call,
+                  selector,
+                  request);
+
+        IVLog(@"answerWithRequest: sent");
+
+    } @catch (NSException *exception) {
+
+        IVLog(@"answer exception: %@",
+              exception);
+
+        IVAnswerInProgress = NO;
+
+        return NO;
+    }
+
+    IVAnswerInProgress = NO;
+
+    /*
+     * 给电话服务一点时间完成接通。
+     */
+
+    dispatch_after(
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            1200 * NSEC_PER_MSEC
+        ),
+        dispatch_get_main_queue(),
+        ^{
+
+        if (!IVCurrentCall)
+            return;
+
+        IVCallActive = YES;
+
+        IVLog(@"Call presumed connected");
+
+        if (IVPrepareAudioSession()) {
+
+            IVPlayGreeting();
+
+        } else {
+
+            IVLog(@"Audio session unavailable");
+        }
+    });
+
+    return YES;
+}
+
+
+#pragma mark ==================================================
+#pragma mark Schedule Answer
+#pragma mark ==================================================
+
+static void IVScheduleAnswer(id call)
+{
+    if (!call)
         return;
 
-    NSArray *names = @[
-        @"answerWithRequest:",
-        @"initWithCall:",
-        @"updateWithCall:",
-        @"callServicesInterface",
-        @"callNotificationManager",
-        @"callCenter",
-        @"callStatus",
-        @"callUUID",
-        @"shouldSuppressInCallUI",
-        @"dialRequestForRedial",
-        @"proxyCallActionsDelegate"
-    ];
+    if (IVAnswerTimer) {
 
-    for (NSString *name in names) {
-
-        SEL selector =
-            NSSelectorFromString(name);
-
-        IVInspectMethodMetadata(cls,
-                                selector);
-    }
-}
-
-
-#pragma mark - Notification Inspection
-
-/*
- * v2.0 notification inspection.
- *
- * We inspect:
- *
- *   notification name
- *   object class
- *   userInfo keys
- *   userInfo value classes
- *
- * We DO NOT call methods on the object.
- */
-
-static void IVInspectUserInfo(NSDictionary *userInfo)
-{
-    if (!userInfo) {
-
-        IVLog(@"USERINFO: (nil)");
+        IVLog(@"Answer timer already active");
 
         return;
     }
 
-    IVLog(@"USERINFO CLASS: %@",
-          NSStringFromClass([userInfo class]));
+    IVCurrentCall = call;
 
-    IVLog(@"USERINFO COUNT: %lu",
-          (unsigned long)[userInfo count]);
+    IVCallActive = NO;
 
-    for (id key in userInfo) {
+    IVGreetingFinished = NO;
 
-        id value = userInfo[key];
+    IVRecordingStarted = NO;
 
-        IVLog(@"USERINFO KEY: %@",
-              [key isKindOfClass:[NSString class]]
-                  ? key
-                  : IVObjectDescriptionSafe(key));
+    IVLog(@"Incoming call captured");
 
-        IVLog(@"USERINFO VALUE CLASS: %@",
-              IVClassName(value));
+    IVLog(@"Auto answer in %.1f seconds",
+          IVAnswerDelay);
 
-        /*
-         * Do not call description on arbitrary private
-         * telephony objects.
-         */
+    IVAnswerTimer =
+        [NSTimer scheduledTimerWithTimeInterval:
+            IVAnswerDelay
+                                         repeats:NO
+                                           block:
+        ^(NSTimer *timer) {
 
-        IVLog(@"USERINFO VALUE: %@",
-              IVObjectDescriptionSafe(value));
-    }
+        IVAnswerTimer = nil;
+
+        if (!IVCurrentCall) {
+
+            IVLog(@"Call disappeared");
+
+            return;
+        }
+
+        IVAnswerCall();
+    }];
 }
 
 
-static void IVHandleCallNotification(NSNotification *note)
+#pragma mark ==================================================
+#pragma mark Notification
+#pragma mark ==================================================
+
+static id IVExtractCall(NSNotification *note)
+{
+    if (!note)
+        return nil;
+
+    id object =
+        note.object;
+
+    if (object) {
+
+        Class cls =
+            object_getClass(object);
+
+        if (cls) {
+
+            const char *name =
+                class_getName(cls);
+
+            if (name &&
+                (strcmp(name, "TUProxyCall") == 0 ||
+                 strcmp(name, "TUCall") == 0)) {
+
+                return object;
+            }
+        }
+    }
+
+    NSDictionary *info =
+        note.userInfo;
+
+    if (!info)
+        return nil;
+
+    for (id key in info) {
+
+        id value =
+            [info objectForKey:key];
+
+        if (!value)
+            continue;
+
+        Class cls =
+            object_getClass(value);
+
+        if (!cls)
+            continue;
+
+        const char *name =
+            class_getName(cls);
+
+        if (name &&
+            (strcmp(name, "TUProxyCall") == 0 ||
+             strcmp(name, "TUCall") == 0)) {
+
+            return value;
+        }
+    }
+
+    return nil;
+}
+
+
+static void IVHandleNotification(NSNotification *note)
 {
     if (!note)
         return;
@@ -504,175 +937,234 @@ static void IVHandleCallNotification(NSNotification *note)
     if (!name)
         return;
 
-    /*
-     * Only TUCallCenter notifications.
-     */
-
-    if (![name containsString:@"TUCallCenter"])
-        return;
-
-    IVLog(@"");
-    IVLog(@"========================================");
-    IVLog(@"CALL NOTIFICATION DETECTED");
-    IVLog(@"========================================");
-
-    IVLog(@"NOTIFICATION: %@",
+    IVLog(@"Notification: %@",
           name);
 
+
     /*
-     * IMPORTANT:
-     * We only inspect the Objective-C class.
+     * Incoming call.
      */
 
-    if (note.object) {
+    if ([name isEqualToString:
+        @"SBIncomingCallPendingNotification"]) {
 
-        IVLog(@"OBJECT CLASS: %@",
-              IVClassName(note.object));
+        id call =
+            IVExtractCall(note);
 
-        IVLog(@"OBJECT POINTER: %p",
-              note.object);
+        if (call) {
 
-    } else {
+            IVScheduleAnswer(call);
 
-        IVLog(@"OBJECT: (nil)");
+        } else {
+
+            IVLog(@"Incoming notification without TUCall");
+        }
+
+        return;
     }
 
-    IVInspectUserInfo(note.userInfo);
 
-    IVLog(@"========================================");
+    /*
+     * Call status changes.
+     */
+
+    if ([name isEqualToString:
+        @"TUCallCenterCallStatusChangedNotification"] ||
+        [name isEqualToString:
+        @"TUCallCenterCallStatusChangedInternalNotification"]) {
+
+        id call =
+            IVExtractCall(note);
+
+        if (call) {
+
+            /*
+             * 如果已经有当前来电，
+             * 不重复建立计时器。
+             */
+
+            if (!IVCurrentCall) {
+
+                /*
+                 * 只通过已有 selector 检查 incoming。
+                 */
+
+                SEL incomingSelector =
+                    NSSelectorFromString(@"isIncoming");
+
+                if ([call respondsToSelector:
+                        incomingSelector]) {
+
+                    BOOL (*msg)(id, SEL) =
+                        (BOOL (*)(id, SEL))objc_msgSend;
+
+                    BOOL incoming =
+                        NO;
+
+                    @try {
+
+                        incoming =
+                            msg(call,
+                                incomingSelector);
+
+                    } @catch (__unused NSException *exception) {
+
+                        incoming = NO;
+                    }
+
+                    if (incoming) {
+
+                        IVScheduleAnswer(call);
+
+                        return;
+                    }
+                }
+            }
+
+
+            /*
+             * 如果已经接听，状态改变可能意味着通话结束。
+             */
+
+            if (IVCurrentCall &&
+                call == IVCurrentCall &&
+                IVCallActive) {
+
+                /*
+                 * 不在这里调用 callStatus。
+                 *
+                 * 只依靠后续通知以及对象生命周期。
+                 */
+
+                IVLog(@"Current call status notification");
+            }
+        }
+    }
 }
 
 
-#pragma mark - Notification Installation
+#pragma mark ==================================================
+#pragma mark Install Notifications
+#pragma mark ==================================================
 
 static void IVInstallObservers(void)
 {
     NSNotificationCenter *center =
         [NSNotificationCenter defaultCenter];
 
-    NSArray *names = @[
+    NSArray *notifications = @[
+        @"SBIncomingCallPendingNotification",
         @"TUCallCenterCallStatusChangedNotification",
         @"TUCallCenterCallStatusChangedInternalNotification",
-        @"TUCallCenterCallerIDChangedNotification",
-        @"TUCallCenterDisplayContextChangedNotification",
         @"TUCallCenterModelChangedNotification",
-        @"TUCallCenterModelStateChangedNotification",
-        @"TUCallCenterProviderContextChangedNotification"
+        @"TUCallCenterModelStateChangedNotification"
     ];
 
-    for (NSString *name in names) {
+    for (NSString *name in notifications) {
 
         [center addObserverForName:name
                             object:nil
                              queue:nil
-                        usingBlock:^(NSNotification *note) {
+                        usingBlock:
+        ^(NSNotification *note) {
 
-            IVHandleCallNotification(note);
+            IVHandleNotification(note);
         }];
 
-        IVLog(@"OBSERVER INSTALLED: %@",
+        IVLog(@"Observer installed: %@",
               name);
     }
 }
 
 
-#pragma mark - Main
+#pragma mark ==================================================
+#pragma mark Constructor
+#pragma mark ==================================================
 
 %ctor
 {
     @autoreleasepool {
 
+        /*
+         * 创建目录。
+         */
+
+        IVCreateDirectories();
+
         IVLog(@"");
         IVLog(@"========================================");
-        IVLog(@"IndependentVoicemail v2.0 LOADED");
+        IVLog(@"IndependentVoicemail FINAL LOADED");
         IVLog(@"========================================");
 
-        IVLog(@"PROCESS: SpringBoard");
-        IVLog(@"PID: %d", getpid());
+        IVLog(@"PID: %d",
+              getpid());
+
+        IVLog(@"Answer delay: %.1f seconds",
+              IVAnswerDelay);
+
+        IVLog(@"Greeting: %@",
+              IVGreetingPath);
+
+        IVLog(@"Recordings: %@",
+              IVRecordingDirectory);
+
 
         /*
-         * ----------------------------------------------------
-         * TUCall
-         * ----------------------------------------------------
+         * TelephonyUtilities
          */
 
-        Class tuCall =
-            objc_getClass("TUCall");
+        void *handle =
+            dlopen(
+                "/System/Library/PrivateFrameworks/TelephonyUtilities.framework/TelephonyUtilities",
+                RTLD_LAZY
+            );
 
-        if (tuCall) {
+        if (handle) {
 
-            IVLog(@"TUCall FOUND");
-
-            IVInspectHierarchy(tuCall);
-
-            IVInspectSelectedMethods(tuCall);
-
-            IVScanInstanceMethods(tuCall);
-
-            IVScanClassMethods(tuCall);
+            IVLog(@"TelephonyUtilities loaded");
 
         } else {
 
-            IVLog(@"TUCall NOT FOUND");
+            IVLog(@"TelephonyUtilities load failed");
         }
 
 
         /*
-         * ----------------------------------------------------
-         * TUProxyCall
-         * ----------------------------------------------------
+         * Runtime classes
          */
 
-        Class tuProxyCall =
-            objc_getClass("TUProxyCall");
+        IVLog(@"TUCall: %@",
+              IVGetClass(@"TUCall")
+                ? @"FOUND"
+                : @"NOT FOUND");
 
-        if (tuProxyCall) {
+        IVLog(@"TUProxyCall: %@",
+              IVGetClass(@"TUProxyCall")
+                ? @"FOUND"
+                : @"NOT FOUND");
 
-            IVLog(@"TUProxyCall FOUND");
-
-            IVInspectHierarchy(tuProxyCall);
-
-            IVInspectSelectedMethods(tuProxyCall);
-
-            IVScanInstanceMethods(tuProxyCall);
-
-            IVScanClassMethods(tuProxyCall);
-
-        } else {
-
-            IVLog(@"TUProxyCall NOT FOUND");
-        }
+        IVLog(@"TUAnswerRequest: %@",
+              IVGetClass(@"TUAnswerRequest")
+                ? @"FOUND"
+                : @"NOT FOUND");
 
 
         /*
-         * ----------------------------------------------------
-         * Notifications
-         * ----------------------------------------------------
+         * Notification system
          */
 
         IVInstallObservers();
 
 
-        /*
-         * ----------------------------------------------------
-         * Safety banner
-         * ----------------------------------------------------
-         */
-
         IVLog(@"");
         IVLog(@"========================================");
-        IVLog(@"v2.0 SAFE INSPECTION ACTIVE");
-        IVLog(@"========================================");
-
-        IVLog(@"NO answerWithRequest: INVOCATION");
-        IVLog(@"NO callStatus INVOCATION");
-        IVLog(@"NO callUUID INVOCATION");
-        IVLog(@"NO callServicesInterface INVOCATION");
-        IVLog(@"NO proxyCallActionsDelegate INVOCATION");
-        IVLog(@"NO updateWithCall: INVOCATION");
-        IVLog(@"NO TUCall INSTANCE METHOD INVOCATION");
-        IVLog(@"NO TUProxyCall INSTANCE METHOD INVOCATION");
-
+        IVLog(@"INDEPENDENT VOICEMAIL FINAL ACTIVE");
+        IVLog(@"AUTO ANSWER: ON");
+        IVLog(@"DELAY: 20 SECONDS");
+        IVLog(@"GREETING: ON");
+        IVLog(@"RECORDING: ON");
+        IVLog(@"MESSAGES INJECTION: OFF");
+        IVLog(@"ANSWERINGMACHINE XS: NOT REQUIRED");
         IVLog(@"========================================");
     }
 }
