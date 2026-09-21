@@ -1,8 +1,9 @@
-include $(THEOS)/makefiles/common.mk
-
-BUNDLE_NAME = IndependentVoicemailPrefs
-IndependentVoicemailPrefs_FILES = IndependentVoicemailPrefs.m
-IndependentVoicemailPrefs_FRAMEWORKS = UIKit
-IndependentVoicemailPrefs_INSTALL_PATH = /Library/PreferenceBundles
-
-include $(THEOS_MAKE_PATH)/bundle.mk
+Package: com.chocolate2018.independentvoicemail
+Name: IndependentVoicemail
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Independent voicemail tweak for iOS 16
+Maintainer: Chocolate2018
+Author: Chocolate2018
+Section: Tweaks
+Depends: mobilesubstrate
