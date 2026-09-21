@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <unistd.h>
 #import <stdarg.h>
 
@@ -10,8 +11,7 @@ static void IVLog(NSString *format, ...) {
     va_start(args, format);
 
     NSString *s =
-        [[NSString alloc] initWithFormat:format
-                               arguments:args];
+        [[NSString alloc] initWithFormat:format arguments:args];
 
     va_end(args);
 
@@ -43,32 +43,43 @@ static void IVLog(NSString *format, ...) {
     }
 }
 
-static BOOL IVEnabled(void) {
-    NSNumber *n =
-        [[NSUserDefaults standardUserDefaults]
-            objectForKey:@"IndependentVoicemailEnabled"];
-
-    return n ? n.boolValue : YES;
-}
-
-static NSInteger IVDelay(void) {
-    NSNumber *n =
-        [[NSUserDefaults standardUserDefaults]
-            objectForKey:@"IndependentVoicemailDelay"];
-
-    return n ? MAX(0, n.integerValue) : 20;
+static void IVCallStateChanged(NSNotification *note) {
+    IVLog(@"Notification received: %@",
+          note.name);
 }
 
 %ctor {
     @autoreleasepool {
 
         IVLog(@"================================");
-        IVLog(@"IndependentVoicemail v1.1 LOADED");
+        IVLog(@"IndependentVoicemail v1.2 LOADED");
         IVLog(@"Process: SpringBoard");
         IVLog(@"PID: %d", getpid());
-        IVLog(@"Enabled: %@", IVEnabled() ? @"YES" : @"NO");
-        IVLog(@"Delay: %ld seconds", (long)IVDelay());
-        IVLog(@"Audio session: NOT initialized");
+
+        /*
+         * Diagnostic only.
+         * No automatic answering.
+         * No recording.
+         * No MobileSMS injection.
+         */
+
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:nil
+            object:nil
+            queue:nil
+            usingBlock:^(NSNotification *note) {
+
+                NSString *name = note.name;
+
+                if ([name rangeOfString:@"Call"
+                                options:NSCaseInsensitiveSearch].location
+                    != NSNotFound) {
+
+                    IVCallStateChanged(note);
+                }
+            }];
+
+        IVLog(@"Call notification monitor installed");
         IVLog(@"================================");
     }
 }
